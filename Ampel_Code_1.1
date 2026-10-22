@@ -1,0 +1,300 @@
+
+from machine import Pin
+import time
+
+
+# 1. HARDWARE
+
+
+# Autoampel
+auto_rot = Pin(12, Pin.OUT, value=0)
+auto_gelb = Pin(27, Pin.OUT, value=0)
+auto_gruen = Pin(25, Pin.OUT, value=0)
+
+# Fussgaengerampel
+fuss_rot = Pin(18, Pin.OUT, value=0)
+fuss_gruen = Pin(21, Pin.OUT, value=0)
+
+# Status-LED
+status_led = Pin(32, Pin.OUT, value=0)
+
+# Zwei Taster mit Pull-up
+taster1 = Pin(4, Pin.IN, Pin.PULL_UP)
+taster2 = Pin(5, Pin.IN, Pin.PULL_UP)
+
+# Digitale Lichtschranke
+sensor = Pin(34, Pin.IN)
+
+
+# 2. ZEITKONSTANTEN
+
+
+AUTO_MIN = 3000
+GELB_ZEIT = 2000
+ROT_ZEIT = 1000
+FUSS_MIN = 5000
+BLINK_DAUER = 2000
+BLINK_INTERVALL = 250
+FREI_ZEIT = 1000
+ENTPRELLZEIT = 30
+
+
+SENSOR_AKTIV = 1
+
+# =================================
+# 3. ZUSTAENDE
+# =================================
+
+AUTO_GRUEN = 0
+AUTO_GELB_VOR = 1
+AUTO_GRUEN_BLINK = 2 
+ALLE_ROT_VOR = 3
+FUSS_GRUEN = 4
+FUSS_BLINKT = 5
+ALLE_ROT_NACH = 6
+AUTO_GELB_NACH = 7
+
+zustand = AUTO_GRUEN
+zustand_start = time.ticks_ms()
+
+anforderung = False
+
+blink_start = zustand_start
+blink_an = True
+
+sensor_frei_start = None
+
+# Taster 1
+roh1 = taster1.value()
+stabil1 = roh1
+zeit1 = zustand_start
+
+# Taster 2
+roh2 = taster2.value()
+stabil2 = roh2
+zeit2 = zustand_start
+
+# =================================
+# 4. TASTER-FLANKENERKENNUNG
+# =================================
+
+def pruefe_taster(pin, jetzt, alt, stabil, start):
+
+    neu = pin.value()
+    tastendruck = False
+
+    # Rohwert hat sich geaendert
+    if neu != alt:
+        alt = neu
+        start = jetzt
+
+    # Signal lange genug stabil?
+    if (neu != stabil and
+        time.ticks_diff(jetzt, start) >= ENTPRELLZEIT):
+
+        stabil = neu
+
+        # Fallende Flanke bei Pull-up
+        if stabil == 0:
+            tastendruck = True
+
+    return alt, stabil, start, tastendruck
+
+# =================================
+# 5. AMPELANZEIGE
+# =================================
+
+def ausgaenge_setzen(zustand, blink_an, anforderung):
+
+    # Auto Rot, Gelb, Gruen,
+    # Fuss Rot, Gruen
+
+    if zustand == AUTO_GRUEN:
+        werte = (0, 0, 1, 1, 0)
+
+    elif zustand in (AUTO_GELB_VOR, AUTO_GELB_NACH):
+        werte = (0, 1, 0, 1, 0)
+
+    elif zustand in (ALLE_ROT_VOR, ALLE_ROT_NACH):
+        werte = (1, 0, 0, 1, 0)
+
+    elif zustand == FUSS_GRUEN:
+        werte = (1, 0, 0, 0, 1)
+
+    elif zustand == FUSS_BLINKT:
+        werte = (1, 0, 0, 0, int(blink_an))
+    elif zustand == AUTO_GRUEN_BLINK:
+        werte = (0, 0, int(blink_an), 1, 0)
+
+
+    else:
+        # Unbekannter Zustand
+        werte = (1, 0, 0, 1, 0)
+
+    auto_rot.value(werte[0])
+    auto_gelb.value(werte[1])
+    auto_gruen.value(werte[2])
+    fuss_rot.value(werte[3])
+    fuss_gruen.value(werte[4])
+
+    # Blau bei Anforderung oder Fussgaengerzyklus
+    status_led.value(
+        int(anforderung or zustand != AUTO_GRUEN)
+    )
+
+
+# Startanzeige
+ausgaenge_setzen(zustand, blink_an, anforderung)
+
+# =================================
+# 6. HAUPTSCHLEIFE
+# =================================
+
+while True:
+
+    jetzt = time.ticks_ms()
+
+    # ------ TASTER 1 ------
+
+    roh1, stabil1, zeit1, druck1 = pruefe_taster(
+        taster1, jetzt, roh1, stabil1, zeit1
+    )
+
+    # ------ TASTER 2 ------
+
+    roh2, stabil2, zeit2, druck2 = pruefe_taster(
+        taster2, jetzt, roh2, stabil2, zeit2
+    )
+
+    # ------ LICHTSCHRANKE ------
+
+    sensor_belegt = sensor.value() == SENSOR_AKTIV
+
+    if sensor_belegt:
+        sensor_frei_start = None
+
+    elif sensor_frei_start is None:
+        sensor_frei_start = jetzt
+
+    # Sensor muss mindestens 1 s frei sein
+    sensor_frei = (
+        sensor_frei_start is not None
+        and time.ticks_diff(
+            jetzt, sensor_frei_start
+        ) >= FREI_ZEIT
+    )
+
+    # ------ ANFORDERUNG ------
+
+    if zustand == AUTO_GRUEN:
+
+        if druck1 or druck2:
+            anforderung = True
+
+    # =================================
+    # 7. ZUSTANDSMASCHINE
+    # =================================
+
+    if zustand == AUTO_GRUEN:
+
+        if (anforderung and
+            time.ticks_diff(
+                jetzt, zustand_start
+            ) >= AUTO_MIN):
+
+            anforderung = False
+            zustand = AUTO_GRUEN_BLINK
+            zustand_start = jetzt
+            
+            
+    elif zustand == AUTO_GRUEN_BLINK:
+
+        if time.ticks_diff(
+            jetzt, zustand_start
+        ) >= BLINK_DAUER:
+
+            zustand = AUTO_GELB_VOR
+            zustand_start = jetzt
+            
+        elif time.ticks_diff(
+            jetzt, blink_start
+        ) >= BLINK_INTERVALL:
+
+            blink_an = not blink_an
+            blink_start = jetzt
+
+    elif zustand == AUTO_GELB_VOR:
+
+        if time.ticks_diff(
+            jetzt, zustand_start
+        ) >= GELB_ZEIT:
+
+            zustand = ALLE_ROT_VOR
+            zustand_start = jetzt
+            
+            
+
+    elif zustand == ALLE_ROT_VOR:
+
+        if time.ticks_diff(
+            jetzt, zustand_start
+        ) >= ROT_ZEIT:
+
+            zustand = FUSS_GRUEN
+            zustand_start = jetzt
+
+    elif zustand == FUSS_GRUEN:
+
+        if (time.ticks_diff(
+            jetzt, zustand_start
+            ) >= FUSS_MIN and sensor_frei):
+
+            zustand = FUSS_BLINKT
+            zustand_start = jetzt
+            blink_start = jetzt
+            blink_an = True
+
+    elif zustand == FUSS_BLINKT:
+
+        # Lichtschranke wird unterbrochen
+        if sensor_belegt:
+
+            zustand = FUSS_GRUEN
+            zustand_start = jetzt
+
+        # Blinkzeit ist vorbei
+        elif time.ticks_diff(
+            jetzt, zustand_start
+            ) >= BLINK_DAUER:
+
+            zustand = ALLE_ROT_NACH
+            zustand_start = jetzt
+
+        # Gruene Fussgaenger-LED umschalten
+        elif time.ticks_diff(
+            jetzt, blink_start
+        ) >= BLINK_INTERVALL:
+
+            blink_an = not blink_an
+            blink_start = jetzt
+
+    elif zustand == ALLE_ROT_NACH:
+
+        if (time.ticks_diff(
+            jetzt, zustand_start
+            ) >= ROT_ZEIT and sensor_frei):
+
+            zustand = AUTO_GELB_NACH
+            zustand_start = jetzt
+            
+    elif zustand == AUTO_GELB_NACH:
+
+        if time.ticks_diff(
+            jetzt, zustand_start
+            ) >= GELB_ZEIT:
+
+            zustand = AUTO_GRUEN
+            zustand_start = jetzt    
+
+    # LEDs in jedem Durchlauf aktualisieren
+    ausgaenge_setzen(zustand, blink_an, anforderung)
